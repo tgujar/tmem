@@ -1,7 +1,7 @@
 #include "tmalloc.h"
 #include "stdio.h"
 
-int main()
+void simple_check()
 {
     int *arr = (int *)tmalloc(sizeof(int) * 10);
     for (int i = 0; i < 10; i++)
@@ -14,4 +14,18 @@ int main()
     }
 
     tfree(arr);
+}
+
+void alloc_freed()
+{
+    int *arr = (int *)tmalloc(sizeof(int) * 10);
+
+    tfree(arr);
+    arr = (int *)tmalloc(sizeof(int) * 10);
+}
+
+int main()
+{
+    simple_check();
+    alloc_freed();
 }
