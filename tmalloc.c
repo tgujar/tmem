@@ -5,14 +5,19 @@
 #include <sys/mman.h>
 #include <unistd.h>
 #include <stdio.h>
+#include <string.h>
 #include <stdbool.h>
 #include <limits.h>
 #include <assert.h>
-#include "tmalloc.h"
+#include "include/tmalloc.h"
 
 #define ALIGNMENT 8
 #define ALIGN(size, align) (((size) + (align - 1)) & ~(align - 1))
-#define HEADER_SIZE sizeof(blk_meta)
+
+// 24 bytes, doesnt need alignment, this is a precaution
+// needs to be aligned, so we can use the last bit to store if the block is allocated
+// reducing size of a block by aligned bytes, will leave a aligned rest of the block
+#define HEADER_SIZE ALIGN(sizeof(blk_meta), ALIGNMENT)
 
 static blk_meta head;
 static blk_meta tail;
@@ -20,11 +25,17 @@ static bool mem_initialized = false;
 static free_list fl;
 
 // TODO: footer does not need to store free list pointers
+// TODO: next and prev pointers can be removed when we allocate block
 
 blk_meta *get_footer(blk_meta *blk)
 {
     size_t sz = get_size(blk);
     return (blk_meta *)((char *)blk + sz);
+}
+
+void copy_meta(blk_meta *header, blk_meta *dest)
+{
+    memcpy(dest, header, HEADER_SIZE);
 }
 
 size_t get_size(blk_meta *blk)
@@ -40,39 +51,46 @@ bool get_blk_status(blk_meta *blk)
 void set_free(blk_meta *blk)
 {
     blk->size = blk->size & ~1;
-    blk_meta *footer = get_footer(blk);
-    footer->size = blk->size & ~1;
+    copy_meta(blk, get_footer(blk));
 }
 
 void set_allocated(blk_meta *blk)
 {
     blk->size = blk->size | 1;
-    blk_meta *footer = get_footer(blk);
-    footer->size = blk->size | 1;
+    copy_meta(blk, get_footer(blk));
 }
 
 void set_size(size_t sz, blk_meta *blk)
 {
+    assert(sz % ALIGNMENT == 0);
     bool allocated = get_blk_status(blk);
     blk->size = sz;
-    blk_meta *footer = get_footer(blk);
-    footer->size = sz;
     if (allocated)
     {
-        set_allocated(footer);
         set_allocated(blk);
     }
+    copy_meta(blk, get_footer(blk));
 }
 
 blk_meta *init_region(size_t sz)
 {
+    // header and footer for the region so we dont access invalid memory
     const int ENDPOINT_HEADER_SIZE = HEADER_SIZE * 2;
+
     size_t alloc_size = ALIGN(sz + HEADER_SIZE * 2 + ENDPOINT_HEADER_SIZE, ALIGNMENT);
     size_t region_size = ALIGN(alloc_size, getpagesize());
 
-    void *region = mmap(NULL, region_size, PROT_READ | PROT_WRITE, MAP_ANON | MAP_SHARED, -1, 0);
+    void *region = mmap(
+        NULL,
+        region_size,
+        PROT_READ | PROT_WRITE, MAP_ANON | MAP_SHARED,
+        -1,
+        0);
+
     blk_meta *start_block = region;
     blk_meta *end_block = (blk_meta *)((char *)region + region_size - HEADER_SIZE);
+
+    // set blocks to allocated so blocks within region never access invalid memory
     set_allocated(start_block);
     set_allocated(end_block);
 
@@ -94,6 +112,7 @@ void push_front(free_list *fl, blk_meta *blk)
     blk->prev = fl->head;
     fl->head->next->prev = blk;
     fl->head->next = blk;
+    copy_meta(blk, get_footer(blk));
 }
 
 void push_back(free_list *fl, blk_meta *blk)
@@ -102,12 +121,17 @@ void push_back(free_list *fl, blk_meta *blk)
     blk->prev = fl->tail->prev;
     fl->tail->prev->next = blk;
     fl->tail->prev = blk;
+    copy_meta(blk, get_footer(blk));
 }
 
 blk_meta *split_block(free_list *fl, blk_meta *blk, size_t sz)
 {
+    assert(sz % ALIGNMENT == 0);
+    assert(get_blk_status(blk) == false);
     if (get_size(blk) == sz)
         return blk;
+
+    // we need to add a header and footer meta to the region
     else if (get_size(blk) < (sz) + HEADER_SIZE * 2)
         return NULL;
 
@@ -123,9 +147,30 @@ blk_meta *split_block(free_list *fl, blk_meta *blk, size_t sz)
     return blk;
 }
 
-blk_meta *get_block(free_list *fl, size_t sz, blk_meta *(*find_fit)(free_list *fl, size_t sz))
+blk_meta *merge_block(free_list *fl, blk_meta *blk1, blk_meta *blk2)
 {
-    blk_meta *ret = (blk_meta *)find_fit(fl, sz + 2 * HEADER_SIZE);
+    assert(blk1 < blk2);
+    assert(get_blk_status(blk1) == false && get_blk_status(blk2) == false);
+
+    erase(blk1);
+    erase(blk2);
+
+    // footer of the blk1 and header of blk2 are the removed
+    size_t new_blk_size = get_size(blk1) + get_size(blk2) + HEADER_SIZE * 2;
+    set_size(new_blk_size, blk1);
+    blk_meta *footer = get_footer(blk2);
+    copy_meta(blk1, footer);
+
+    push_back(fl, blk1);
+    return blk1;
+}
+
+blk_meta *get_block(
+    free_list *fl,
+    size_t sz,
+    blk_meta *(*find_fit)(free_list *fl, size_t sz))
+{
+    blk_meta *ret = (blk_meta *)find_fit(fl, sz);
     if (ret)
     {
         ret = split_block(fl, ret, sz);
@@ -140,6 +185,7 @@ blk_meta *get_block(free_list *fl, size_t sz, blk_meta *(*find_fit)(free_list *f
 
 blk_meta *best_fit(free_list *fl, size_t sz)
 {
+    sz = ALIGN(sz, ALIGNMENT);
     blk_meta *temp = fl->head->next;
     size_t fit = INT_MAX;
     blk_meta *ret = NULL;
@@ -148,10 +194,15 @@ blk_meta *best_fit(free_list *fl, size_t sz)
         size_t temp_size = get_size(temp);
         if (temp_size >= sz && temp_size < fit)
         {
-            ret = temp;
-            fit = temp_size;
             if (temp_size == sz)
                 return ret;
+
+            // WARNING: we might end up with blocks of size 0
+            else if (temp_size >= sz + HEADER_SIZE * 2)
+            {
+                ret = temp;
+                fit = temp_size;
+            }
         }
         temp = temp->next;
     }
@@ -182,7 +233,15 @@ void *tmalloc(size_t size)
 
 void tfree(void *ptr)
 {
-    blk_meta *header = (blk_meta *)((char *)ptr - HEADER_SIZE);
-    set_free(header);
-    push_back(&fl, header);
+    blk_meta *blk = (blk_meta *)((char *)ptr - HEADER_SIZE);
+    set_free(blk);
+    push_back(&fl, blk);
+
+    blk_meta *prev_blk = (blk_meta *)((char *)blk - HEADER_SIZE);
+    blk_meta *next_blk = (blk_meta *)((char *)get_footer(blk) - HEADER_SIZE);
+
+    if (get_blk_status(prev_blk) == false)
+        blk = merge_block(&fl, prev_blk, blk);
+    if (get_blk_status(next_blk) == false)
+        blk = merge_block(&fl, blk, next_blk);
 }
