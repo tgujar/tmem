@@ -2,34 +2,38 @@ cmake_minimum_required(VERSION 3.5)
 project(tmem)
 
 # Custom cmake modules
-# set(CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+set(CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
+set(CMAKE_BUILD_TYPE Debug)
 
-set(BUILD_SHARED_LIBS OFF)
+###############################################################################
+include(CheckCSourceCompiles)
+include(CheckCSourceRuns)
+include(CheckFunctionExists)
+include(CheckIncludeFile)
+include(CheckIncludeFiles)
+include(CheckLibraryExists)
+include(CheckSymbolExists)
+include(CheckTypeSize)
 
-# Add your source files
-set(SOURCES
-    tmalloc.c
-    # Add more source files if needed
-)
+###############################################################################
+# Check headers
+set(INCLUDES "")
+macro(ck_check_include_file header var)
+  check_include_files("${INCLUDES};${header}" ${var})
+  if(${var})
+    set(INCLUDES ${INCLUDES} ${header})
+  endif(${var})
+endmacro(ck_check_include_file)
 
-# Create the library target
-add_library(tmem ${SOURCES})
+ck_check_include_file("stdlib.h" HAVE_STDLIB_H)
 
-target_include_directories(tmem PUBLIC include)
-set_target_properties(tmem PROPERTIES PUBLIC_HEADER include/tmalloc.h)
-
-# Optionally, you can enable additional warnings and optimizations
-# for the release build type
-set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -Wall -O2")
-
-
-install(TARGETS tmem
-  RUNTIME DESTINATION bin
-  LIBRARY DESTINATION lib
-  ARCHIVE DESTINATION lib
-  PUBLIC_HEADER DESTINATION include
-)
-
-enable_testing()
-
+###############################################################################
+# Subdirectories
+add_subdirectory(src)
 add_subdirectory(tests)
+
+###############################################################################
+# Unit tests
+enable_testing()
+add_test(NAME check_tmem COMMAND check_tmem)
+

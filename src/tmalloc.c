@@ -9,7 +9,8 @@
 #include <stdbool.h>
 #include <limits.h>
 #include <assert.h>
-#include "include/tmalloc.h"
+#include "tmalloc.h"
+#include "logger.h"
 
 #define ALIGNMENT 8
 #define ALIGN(size, align) (((size) + (align - 1)) & ~(align - 1))
@@ -30,7 +31,7 @@ static free_list fl;
 blk_meta *get_footer(blk_meta *blk)
 {
     size_t sz = get_size(blk);
-    return (blk_meta *)((char *)blk + sz);
+    return (blk_meta *)((char *)blk + sz + HEADER_SIZE);
 }
 
 void copy_meta(blk_meta *header, blk_meta *dest)
@@ -74,11 +75,15 @@ void set_size(size_t sz, blk_meta *blk)
 
 blk_meta *init_region(size_t sz)
 {
+    logger("INFO", "asked to init a region of size atleast: %zu", sz);
     // header and footer for the region so we dont access invalid memory
     const int ENDPOINT_HEADER_SIZE = HEADER_SIZE * 2;
 
     size_t alloc_size = ALIGN(sz + HEADER_SIZE * 2 + ENDPOINT_HEADER_SIZE, ALIGNMENT);
     size_t region_size = ALIGN(alloc_size, getpagesize());
+
+    logger("INFO", "aligned alloc size is %zu bytes", alloc_size);
+    logger("INFO", "allocating region of size %zu bytes", region_size);
 
     void *region = mmap(
         NULL,
@@ -91,11 +96,13 @@ blk_meta *init_region(size_t sz)
     blk_meta *end_block = (blk_meta *)((char *)region + region_size - HEADER_SIZE);
 
     // set blocks to allocated so blocks within region never access invalid memory
-    set_allocated(start_block);
-    set_allocated(end_block);
+    start_block->size = start_block->size | 1;
+    end_block->size = end_block->size | 1;
 
     blk_meta *allocated = (blk_meta *)((char *)region + HEADER_SIZE);
     set_size(region_size - ENDPOINT_HEADER_SIZE - HEADER_SIZE * 2, allocated);
+
+    logger("INFO", "usable block is of size %zu bytes", get_size(allocated));
     return allocated;
 }
 
@@ -126,6 +133,7 @@ void push_back(free_list *fl, blk_meta *blk)
 
 blk_meta *split_block(free_list *fl, blk_meta *blk, size_t sz)
 {
+
     assert(sz % ALIGNMENT == 0);
     assert(get_blk_status(blk) == false);
     if (get_size(blk) == sz)
@@ -137,6 +145,8 @@ blk_meta *split_block(free_list *fl, blk_meta *blk, size_t sz)
 
     erase(blk);
     size_t og_sz = get_size(blk);
+    logger("INFO", "splitting original block is of size %zu bytes", og_sz);
+
     set_size(sz, blk);
 
     blk_meta *other_blk = (blk_meta *)((char *)blk + HEADER_SIZE * 2 + sz);
@@ -144,22 +154,32 @@ blk_meta *split_block(free_list *fl, blk_meta *blk, size_t sz)
 
     push_back(fl, blk);
     push_back(fl, other_blk);
+
+    logger("INFO",
+           "split into two blocks of size %zu bytes and %zu bytes, with header size %zu bytes ",
+           get_size(blk),
+           get_size(other_blk), HEADER_SIZE);
+
     return blk;
 }
 
 blk_meta *merge_block(free_list *fl, blk_meta *blk1, blk_meta *blk2)
 {
-    assert(blk1 < blk2);
     assert(get_blk_status(blk1) == false && get_blk_status(blk2) == false);
-
+    logger("INFO",
+           "merging two blocks of size %zu bytes and %zu bytes, with header size %zu bytes",
+           get_size(blk1),
+           get_size(blk2), HEADER_SIZE);
     erase(blk1);
     erase(blk2);
 
     // footer of the blk1 and header of blk2 are the removed
     size_t new_blk_size = get_size(blk1) + get_size(blk2) + HEADER_SIZE * 2;
     set_size(new_blk_size, blk1);
-    blk_meta *footer = get_footer(blk2);
-    copy_meta(blk1, footer);
+
+    logger("INFO",
+           "combined blocks into block with size %zu bytes",
+           get_size(blk1));
 
     push_back(fl, blk1);
     return blk1;
@@ -234,11 +254,16 @@ void *tmalloc(size_t size)
 void tfree(void *ptr)
 {
     blk_meta *blk = (blk_meta *)((char *)ptr - HEADER_SIZE);
+    logger("INFO", "freeing block of size %zu bytes", get_size(blk));
     set_free(blk);
     push_back(&fl, blk);
 
     blk_meta *prev_blk = (blk_meta *)((char *)blk - HEADER_SIZE);
-    blk_meta *next_blk = (blk_meta *)((char *)get_footer(blk) - HEADER_SIZE);
+    logger("INFO", "previous block to freed block is  of size %zu bytes",
+           get_size(prev_blk));
+    blk_meta *next_blk = (blk_meta *)((char *)get_footer(blk) + HEADER_SIZE);
+    logger("INFO", "next block to freed block is  of size %zu bytes",
+           get_size(next_blk));
 
     if (get_blk_status(prev_blk) == false)
         blk = merge_block(&fl, prev_blk, blk);

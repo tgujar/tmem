@@ -1,6 +1,6 @@
 #include <stdio.h>
 #include <check.h>
-#include <tmalloc.h>
+#include "../include/tmalloc.h"
 
 START_TEST(simple_check)
 {
