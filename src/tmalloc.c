@@ -1,7 +1,3 @@
-#ifndef TMALLOC_H
-#define TMALLOC_H
-#endif
-
 #include <sys/mman.h>
 #include <unistd.h>
 #include <stdio.h>
@@ -236,11 +232,6 @@ void mem_init()
     tail.prev = &head;
     fl.head = &head;
     fl.tail = &tail;
-}
-
-void *dummy(size_t sz)
-{
-    return NULL;
 }
 
 void *tmalloc(size_t size)

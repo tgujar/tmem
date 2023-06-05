@@ -1,3 +1,7 @@
+#ifndef TMALLOC_H
+#define TMALLOC_H
+#endif
+
 #include <stdlib.h>
 #include <stdbool.h>
 
